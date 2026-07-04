@@ -276,6 +276,31 @@
       margin-top: 10px;
     }
 
+    .kickoff-display {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      flex-shrink: 0;
+      text-align: center;
+    }
+    .kickoff-date {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .kickoff-time-et {
+      font-size: 18px;
+      font-weight: 900;
+      color: #fff;
+      letter-spacing: 0.5px;
+    }
+    .kickoff-tz {
+      font-size: 10px;
+      color: var(--muted);
+      letter-spacing: 0.5px;
+    }
+
     /* STANDINGS */
     .groups-grid {
       display: grid;
@@ -519,10 +544,16 @@ function flagEmoji(abbr) {
 
 function teamFlag(team) {
   if (!team) return '🏳️';
-  // Try abbreviation
   if (team.abbreviation) return flagEmoji(team.abbreviation);
-  // Try short name initials
   return '🏳️';
+}
+
+// Resolve a real team name; treat placeholders ("TBD", "Winner of …", etc.) as TBD.
+function resolveTeamName(team) {
+  if (!team) return 'TBD';
+  const raw = team.shortDisplayName || team.displayName || team.name || '';
+  if (!raw || raw === 'TBD' || /^(Winner|Loser|Qualifier|Group|Pending)/i.test(raw)) return 'TBD';
+  return raw;
 }
 
 function formatTime(dateStr) {
@@ -531,6 +562,23 @@ function formatTime(dateStr) {
     const d = new Date(dateStr);
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   } catch { return ''; }
+}
+
+// Format kickoff date and time in US Eastern time.
+function formatKickoffET(dateStr) {
+  if (!dateStr) return { date: '', time: '' };
+  try {
+    const d = new Date(dateStr);
+    const date = d.toLocaleDateString('en-US', {
+      timeZone: 'America/New_York', month: 'long', day: 'numeric'
+    });
+    const time = d.toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit'
+    });
+    return { date, time };
+  } catch {
+    return { date: '', time: formatTime(dateStr) };
+  }
 }
 
 function formatDate(dateStr) {
@@ -616,14 +664,12 @@ function renderMatchCard(event) {
 
   const state = event.status?.type?.state || 'pre';
   const statusText = event.status?.type?.shortDetail || event.status?.displayClock || '';
-  const venue = comp.venue?.fullName || '';
+  const venue = comp.venue?.fullName || comp.venue?.shortName || '';
 
   const homeFlag = teamFlag(home.team);
   const awayFlag = teamFlag(away.team);
-  const homeName = home.team?.shortDisplayName || home.team?.name || 'Home';
-  const awayName = away.team?.shortDisplayName || away.team?.name || 'Away';
-  const homeScore = home.score ?? '-';
-  const awayScore = away.score ?? '-';
+  const homeName = resolveTeamName(home.team);
+  const awayName = resolveTeamName(away.team);
 
   let cardClass = 'match-card';
   let statusClass = 'match-status';
@@ -631,29 +677,43 @@ function renderMatchCard(event) {
   else if (state === 'post') { cardClass += ' final'; statusClass += ' final'; }
   else { cardClass += ' scheduled'; statusClass += ' scheduled'; }
 
-  const timeStr = state === 'pre' ? formatTime(event.date) : '';
+  // Center block: kickoff info for upcoming, scores for live/final
+  let centerBlock;
+  if (state === 'pre') {
+    const { date, time } = formatKickoffET(event.date);
+    centerBlock = `<div class="kickoff-display">
+      <div class="kickoff-date">${date}</div>
+      <div class="kickoff-time-et">${time}</div>
+      <div class="kickoff-tz">ET${venue ? ' · ' + venue : ''}</div>
+    </div>`;
+  } else {
+    const homeScore = home.score ?? '-';
+    const awayScore = away.score ?? '-';
+    centerBlock = `<div class="score-block">
+      <div class="score">${homeScore}</div>
+      <div class="score-sep">–</div>
+      <div class="score">${awayScore}</div>
+    </div>`;
+  }
+
+  const statusLabel = statusText || (state === 'post' ? 'Full Time' : state === 'in' ? 'Live' : '');
 
   return `<div class="${cardClass}">
     <div class="match-meta">
-      <div class="${statusClass}">${statusText || (state === 'pre' ? formatTime(event.date) : state === 'post' ? 'Final' : 'Live')}</div>
-      ${venue ? `<div class="match-venue">${venue}</div>` : ''}
+      ${statusLabel ? `<div class="${statusClass}">${statusLabel}</div>` : '<div></div>'}
+      ${venue && state !== 'pre' ? `<div class="match-venue">${venue}</div>` : '<div></div>'}
     </div>
     <div class="match-teams">
       <div class="team">
         <div class="team-flag">${homeFlag}</div>
         <div class="team-name">${homeName}</div>
       </div>
-      <div class="score-block">
-        <div class="score">${homeScore}</div>
-        <div class="score-sep">–</div>
-        <div class="score">${awayScore}</div>
-      </div>
+      ${centerBlock}
       <div class="team">
         <div class="team-flag">${awayFlag}</div>
         <div class="team-name">${awayName}</div>
       </div>
     </div>
-    ${event.date ? `<div class="match-time-display">${new Date(event.date).toLocaleDateString([], {month:'short',day:'numeric'})}</div>` : ''}
   </div>`;
 }
 
@@ -741,19 +801,23 @@ function renderSchedule(data) {
       const home = comp?.competitors?.find(c => c.homeAway === 'home');
       const away = comp?.competitors?.find(c => c.homeAway === 'away');
       if (!home || !away) return '';
-      const homeName = home.team?.shortDisplayName || 'Home';
-      const awayName = away.team?.shortDisplayName || 'Away';
+      const homeName = resolveTeamName(home.team);
+      const awayName = resolveTeamName(away.team);
       const homeFlag = teamFlag(home.team);
       const awayFlag = teamFlag(away.team);
-      const timeStr = event.date ? formatTime(event.date) : '--:--';
-      const venue = comp?.venue?.fullName || '';
+      const venue = comp?.venue?.fullName || comp?.venue?.shortName || '';
       const state = event.status?.type?.state;
-      const scoreStr = state === 'in' || state === 'post'
-        ? `${home.score ?? '?'} – ${away.score ?? '?'}`
-        : '';
+
+      let timeCol;
+      if (state === 'in' || state === 'post') {
+        timeCol = `${home.score ?? '?'} – ${away.score ?? '?'}`;
+      } else {
+        const { time } = formatKickoffET(event.date);
+        timeCol = time || '--:--';
+      }
 
       return `<div class="schedule-match">
-        <div class="schedule-time">${scoreStr || timeStr}</div>
+        <div class="schedule-time">${timeCol}</div>
         <div class="schedule-teams">
           ${homeFlag} ${homeName}
           <span class="schedule-vs">vs</span>
