@@ -484,33 +484,26 @@
 </header>
 
 <div class="tabs">
-  <div class="tab active" data-tab="scores">⚽ Live Scores</div>
-  <div class="tab" data-tab="standings">📊 Standings</div>
-  <div class="tab" data-tab="schedule">📅 Schedule</div>
+  <div class="tab active" data-tab="schedule">📅 Schedule</div>
+  <div class="tab" data-tab="scores">⚽ Live Scores</div>
 </div>
 
 <main>
-  <div id="tab-scores" class="tab-panel active">
-    <div id="scores-content">
-      <div class="loading-spinner"><div class="spinner"></div>Loading live scores...</div>
-    </div>
-  </div>
-
-  <div id="tab-standings" class="tab-panel">
-    <div id="standings-content">
-      <div class="loading-spinner"><div class="spinner"></div>Loading standings...</div>
-    </div>
-  </div>
-
-  <div id="tab-schedule" class="tab-panel">
+  <div id="tab-schedule" class="tab-panel active">
     <div id="schedule-content">
       <div class="loading-spinner"><div class="spinner"></div>Loading schedule...</div>
+    </div>
+  </div>
+
+  <div id="tab-scores" class="tab-panel">
+    <div id="scores-content">
+      <div class="loading-spinner"><div class="spinner"></div>Loading live scores...</div>
     </div>
   </div>
 </main>
 
 <footer>
-  Data via ESPN Public API &bull; Auto-refreshes every 60 seconds &bull; FIFA World Cup 2026
+  Data via ESPN Public API &bull; Live matches refresh every 30s, others every 60s &bull; FIFA World Cup 2026
 </footer>
 
 <script>
@@ -592,13 +585,6 @@ function formatDate(dateStr) {
 // ─── ESPN API FETCH ────────────────────────────────────────────────────────────
 async function fetchScoreboard() {
   const url = 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard';
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
-}
-
-async function fetchStandings() {
-  const url = 'https://site.api.espn.com/apis/v2/sports/soccer/fifa.world/standings';
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.json();
@@ -835,61 +821,86 @@ function renderSchedule(data) {
 }
 
 // ─── DATA LOAD & REFRESH ───────────────────────────────────────────────────────
+const INTERVAL_LIVE = 30;   // seconds when a match is in progress
+const INTERVAL_IDLE = 60;   // seconds otherwise
+const INTERVAL_ERROR = 15;  // seconds after a fetch failure (retry sooner)
+
 let scoreboardData = null;
 let standingsData = null;
 let refreshTimer = null;
-let countdown = REFRESH_INTERVAL;
+let tickTimer = null;
+let countdown = INTERVAL_IDLE;
+let hasLive = false;
+
+function hasLiveMatches(data) {
+  return (data?.events || []).some(e => e.status?.type?.state === 'in');
+}
 
 async function loadAll() {
   const scoresEl = document.getElementById('scores-content');
-  const standingsEl = document.getElementById('standings-content');
   const scheduleEl = document.getElementById('schedule-content');
+  let fetchError = false;
 
   try {
-    const [sbData, stData] = await Promise.allSettled([
-      fetchScoreboard(),
-      fetchStandings(),
-    ]);
-
-    if (sbData.status === 'fulfilled') {
-      scoreboardData = sbData.value;
-      scoresEl.innerHTML = renderScores(scoreboardData);
-      scheduleEl.innerHTML = renderSchedule(scoreboardData);
-    } else {
-      scoresEl.innerHTML = `<div class="error-box">Could not load scores. The ESPN API may be temporarily unavailable.<br><small>${sbData.reason}</small></div>`;
-      scheduleEl.innerHTML = `<div class="error-box">Schedule unavailable.</div>`;
-    }
-
-    if (stData.status === 'fulfilled') {
-      standingsData = stData.value;
-      standingsEl.innerHTML = renderStandings(standingsData);
-    } else {
-      standingsEl.innerHTML = `<div class="error-box">Could not load standings.<br><small>${stData.reason}</small></div>`;
-    }
+    const sbData = await fetchScoreboard().catch(e => { throw e; });
+    scoreboardData = sbData;
+    hasLive = hasLiveMatches(scoreboardData);
+    scoresEl.innerHTML = renderScores(scoreboardData);
+    scheduleEl.innerHTML = renderSchedule(scoreboardData);
 
     const now = new Date();
     document.getElementById('last-updated').textContent =
       'Updated ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-
   } catch (err) {
-    scoresEl.innerHTML = `<div class="error-box">Failed to load data: ${err.message}</div>`;
+    fetchError = true;
+    const msg = `<div class="error-box">Could not load data — retrying soon.<br><small>${err}</small></div>`;
+    scoresEl.innerHTML = msg;
+    scheduleEl.innerHTML = msg;
   }
+
+  return fetchError;
 }
 
-function startCountdown() {
-  clearInterval(refreshTimer);
-  countdown = REFRESH_INTERVAL;
-  const el = document.getElementById('countdown');
-  refreshTimer = setInterval(() => {
-    countdown--;
-    el.textContent = `Next update in ${countdown}s`;
-    if (countdown <= 0) {
-      clearInterval(refreshTimer);
-      el.textContent = 'Refreshing...';
-      loadAll().then(() => startCountdown());
-    }
-  }, 1000);
+function nextInterval(fetchError) {
+  if (fetchError) return INTERVAL_ERROR;
+  return hasLive ? INTERVAL_LIVE : INTERVAL_IDLE;
 }
+
+function stopTimers() {
+  clearTimeout(refreshTimer);
+  clearInterval(tickTimer);
+}
+
+function startCycle(intervalOverride) {
+  stopTimers();
+  countdown = intervalOverride ?? nextInterval(false);
+  const countEl = document.getElementById('countdown');
+
+  // Tick every second to update the countdown display.
+  tickTimer = setInterval(() => {
+    countdown--;
+    countEl.textContent = `Next update in ${countdown}s`;
+  }, 1000);
+
+  // Single shot — fires once, then re-arms itself after the fetch completes.
+  refreshTimer = setTimeout(async () => {
+    clearInterval(tickTimer);
+    countEl.textContent = 'Refreshing...';
+    const err = await loadAll();
+    startCycle(nextInterval(err));
+  }, countdown * 1000);
+
+  countEl.textContent = `Next update in ${countdown}s`;
+}
+
+// Refresh immediately when the user returns to the tab, then re-arm.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    stopTimers();
+    document.getElementById('countdown').textContent = 'Refreshing...';
+    loadAll().then(err => startCycle(nextInterval(err)));
+  }
+});
 
 // ─── TABS ──────────────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(tab => {
@@ -903,13 +914,13 @@ document.querySelectorAll('.tab').forEach(tab => {
 
 // ─── MANUAL REFRESH ────────────────────────────────────────────────────────────
 document.getElementById('manual-refresh').addEventListener('click', () => {
-  clearInterval(refreshTimer);
+  stopTimers();
   document.getElementById('countdown').textContent = 'Refreshing...';
-  loadAll().then(() => startCountdown());
+  loadAll().then(err => startCycle(nextInterval(err)));
 });
 
 // ─── INIT ──────────────────────────────────────────────────────────────────────
-loadAll().then(() => startCountdown());
+loadAll().then(err => startCycle(nextInterval(err)));
 </script>
 </body>
 </html>
